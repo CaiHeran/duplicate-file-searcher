@@ -27,8 +27,8 @@ Found (xxxB) xxx/xxx/xxx
 Found (xxB) xxx/xxx/xxx
 nonempty/total
 0000.102965500 go to check files of xxxB.
-Hash xxxxxxxxxx : xxx/xxx/xxx
-Hash xxxxxxxxxx : xxx/xxx/xxx
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx : xxx/xxx/xxx
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx : xxx/xxx/xxx
 ...
 print #1
 print #2
@@ -38,7 +38,7 @@ print #2
 Done.
  */
 
-import "headers.hpp";
+#include "headers.hpp"
 
 using int32 = std::int32_t;
 using int64 = std::int64_t;
@@ -87,24 +87,24 @@ auto myclock()
  * especially on small data.
  */
 template <class File>
-XXH64_hash_t XXH3_64bits_file(File&& file)
+xxh::hash128_t xxhash3_128_file(File&& file)
 {
     constexpr std::streamsize buffersize{1<<22}; // 4 MiB
-    thread_local auto buffer = std::make_unique<char[]>(buffersize);
+    thread_local auto buffer = std::make_unique_for_overwrite<char[]>(buffersize);
 
     std::ifstream fin(file, std::ios_base::binary);
 
     if (fs::file_size(file)<=buffersize)
     {
         fin.read(buffer.get(), buffersize);
-        return XXH3_64bits(buffer.get(), fin.gcount());
+        return xxh::xxhash3<128>(buffer.get(), fin.gcount());
     }
     else {
         constexpr auto halfsize{buffersize/2};
         fin.read(buffer.get(), halfsize);
         fin.seekg(-halfsize, std::ios_base::end);
         fin.read(buffer.get()+halfsize, halfsize);
-        return XXH3_64bits(buffer.get(), buffersize);
+        return xxh::xxhash3<128>(buffer.get(), buffersize);
     }
 }
 
@@ -117,7 +117,7 @@ template <class Container>
 auto search(const fs::path dir, Container& size_map)
 {
     myout << _T("开始搜索\n");
-    std::size_t tot=0, empty=0;
+    size_t tot=0, empty=0;
 
     myout << _T("以下是空文件：\n");
     for (const auto& entry: fs::recursive_directory_iterator(dir))
@@ -147,8 +147,8 @@ template<ranges::input_range Iterable, class Container>
 void hash_check(Iterable&& paths, Container& xxh_map)
 {
     for (auto&& path: paths) {
-        XXH64_hash_t hash = XXH3_64bits_file(path);
-        mylog << format(_T("Hash {} : {}\n"), hash, path);
+        auto hash = xxhash3_128_file(path);
+        mylog << format(_T("{:016x}{:016x} : {}\n"), hash.high64, hash.low64, path);
         xxh_map[hash].emplace_back(std::move(path));
     }
 }
@@ -164,7 +164,7 @@ void duplicate_file_search(const fs::path dirpath)
 
     std::map<uint64, std::vector<path_string>> size_map;
     search(dirpath, size_map);
-    size_t num{0};
+    size_t num=0;
 
     for (auto&& pair: size_map)
     {
@@ -174,7 +174,7 @@ void duplicate_file_search(const fs::path dirpath)
             continue;
 
         mylog << format(_T("{:%M%S} go to check files of {}B.\n"), myclock(), filesize);
-        std::map<XXH64_hash_t, std::vector<path_string>> xxh_map;
+        std::map<xxh::hash128_t, std::vector<path_string>> xxh_map;
         hash_check(std::move(paths), xxh_map);
         for (auto&& paths: xxh_map | views::values)
         if (paths.size()>=2)

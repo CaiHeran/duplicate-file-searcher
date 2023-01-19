@@ -12,4 +12,4 @@
 #include <map>
 #include <vector>
 
-#include <xxhash.h>
+#include "xxhash.hpp"
