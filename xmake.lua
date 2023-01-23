@@ -9,7 +9,7 @@ end
 
 add_cxflags("/utf-8")
 
-target("check")
+target("dfsearch")
     set_kind("binary")
     set_optimize("fastest")
     set_warnings("more")

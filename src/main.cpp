@@ -17,12 +17,20 @@
 ...
 ......
 
-Done.
+Done in x.xxxs.
  */
 
-#include "headers.hpp"
+#include <iostream>
+#include <fstream>
+#include <format>
+#include <filesystem>
 
-using std::endl;
+#include <ranges>
+#include <map>
+#include <vector>
+
+#include "xxhash.hpp"
+
 using std::format;
 
 namespace fs = std::filesystem;
@@ -39,34 +47,62 @@ namespace views = std::views;
 
 
 /**
- * @brief Calculates the 128-bit hash of @p file using XXH3_128bits.
+ * @brief Hash all @p files and sort them by hash value.
  * 
- * If the file is not larger than 4 MiB, digest the whole file;
- * otherwise, digest the first 2 MiB and the last 2 MiB.
- *
- * xxHash is an extremely fast non-cryptographic hash algorithm.
- * The latest variant, XXH3, offers improved performance across the board,
- * especially on small data.
+ * Algorithm:
+ * In case of small files, directly hash the whole files.
+ * Or else, hash the first 512 B and the last 512 B firstly,
+ * and group files by hash value.
+ * Then for each multiple group, hash the entire files and
+ * group them by hash value.
+ * Every ultimate multiple group is a result.
  */
-template <class File>
-xxh::hash128_t xxhash3_128_file(File&& file)
+template<ranges::input_range Iterable, class Container>
+void hash_check(Iterable&& filelist, Container &res)
 {
-    constexpr std::streamsize buffersize{1<<22}; // 4 MiB
-    thread_local auto buffer = std::make_unique_for_overwrite<char[]>(buffersize);
+    constexpr std::size_t buffersize{1<<15}; // 32 KiB
+    xxh::hash3_state128_t state;
+    std::map<xxh::hash128_t, typename Container::value_type> map1, map2;
+    char buffer[buffersize];
 
-    std::ifstream fin(file, std::ios_base::binary);
-
-    if (fs::file_size(file)<=buffersize)
+    if (fs::file_size(*filelist.cbegin()) <= buffersize)
     {
-        fin.read(buffer.get(), buffersize);
-        return xxh::xxhash3<128>(buffer.get(), fin.gcount());
+        for (auto& file: filelist) {
+            std::ifstream fin(file, std::ios_base::binary);
+            fin.read(buffer, buffersize);
+            auto hash = xxh::xxhash3<128>(buffer, fin.gcount());
+            map1[hash].emplace_back(std::move(file));
+        }
+        for (auto& files: map1 | views::values)
+            if (files.size() > 1)
+                res.emplace_back(std::move_if_noexcept(files));
+        return;
     }
-    else {
+
+    for (auto&& file: filelist) {
+        constexpr auto buffersize{1<<10}; // 1 KiB
         constexpr auto halfsize{buffersize/2};
-        fin.read(buffer.get(), halfsize);
+        std::ifstream fin(file, std::ios_base::binary);
+        fin.read(buffer, buffersize-halfsize);
         fin.seekg(-halfsize, std::ios_base::end);
-        fin.read(buffer.get()+halfsize, halfsize);
-        return xxh::xxhash3<128>(buffer.get(), buffersize);
+        fin.read(buffer+halfsize, halfsize);
+        auto hash = xxh::xxhash3<128>(buffer, buffersize);
+        map1[hash].emplace_back(std::move(file));
+    }
+
+    for (auto& files1: map1 | views::values)
+    if (files1.size() > 1) {
+        map2.clear();
+        for (auto& file: files1) {
+            std::ifstream fin(file, std::ios_base::binary);
+            state.reset();
+            while (fin.read(buffer, buffersize).gcount())
+                state.update(buffer, fin.gcount());
+            map2[state.digest()].emplace_back(std::move(file));
+        }
+        for (auto& files2: map2 | views::values)
+            if (files2.size() > 1)
+                res.emplace_back(std::move_if_noexcept(files2));
     }
 }
 
@@ -88,37 +124,25 @@ auto search(const fs::path dir, Container& size_map)
         auto& path_str = entry.path().native();
         if (!entry.file_size()) {
             empty++;
-            myout << path_str << endl;
+            myout << path_str << std::endl;
         }
         else {
             size_map[entry.file_size()].emplace_back(path_str);
         }
     }
 
-    myout << format(_T("\n空文件：{}\n总文件：{}\n"), empty, tot) << endl;
+    myout << format(_T("\n空文件：{}\n总文件：{}\n"), empty, tot) << std::endl;
 
     return std::make_pair(tot-empty, tot);
-}
-
-/**
- * @brief Hash all files in @p paths and sort them by hash value.
- */
-template<ranges::input_range Iterable, class Container>
-void hash_check(Iterable&& paths, Container& xxh_map)
-{
-    for (auto&& path: paths) {
-        auto hash = xxhash3_128_file(path);
-        xxh_map[hash].emplace_back(std::move(path));
-    }
 }
 
 /**
  * @brief Search @p dirpath for duplicate files.
  * 
  * Algorithm:
- * 1. Search @p dipath recursively for all regular files.
+ * 1. Search @p dirpath recursively for all regular files.
  * 2. Group files by size, with empty files directly output.
- * 3. For each group of multiple files, group them by hash value.
+ * 3. For each group of multiple files, group them by hashing.
  * 4. If an ultimate group is multiple, output it.
  */
 void duplicate_file_search(const fs::path dirpath)
@@ -136,21 +160,19 @@ void duplicate_file_search(const fs::path dirpath)
         if (paths.size() <= 1)
             continue;
 
-        std::map<xxh::hash128_t, std::vector<path_string>> xxh_map;
-        hash_check(std::move(paths), xxh_map);
-        for (auto&& paths: xxh_map | views::values)
-        if (paths.size()>=2)
-        {
+        std::vector<std::vector<path_string>> res;
+        hash_check(std::move(paths), res);
+        for (auto&& paths: res) {
             num++;
             ranges::sort(paths);
             myout << format(_T(" #{} ({}) {}B\n"), num, paths.size(), filesize);
             for (const auto& p: paths)
                 (myout << p).put('\n');
-            myout << endl;
+            myout << std::endl;
         }
     }
 
-    myout << _T("Done.\n");
+    myout << format(_T("Done in {}s.\n"), (double)clock()/CLOCKS_PER_SEC);
 }
 
 int main(int argc, char *argv[])
@@ -176,9 +198,9 @@ int main(int argc, char *argv[])
 
     try { duplicate_file_search(dir); }
     catch (const fs::filesystem_error& fs_err) {
-        std::cerr << "Filesystem Exception: " << fs_err.what() << endl;
+        std::cerr << "Filesystem Exception: " << fs_err.what() << std::endl;
     }
     catch (const std::exception& e) {
-        std::cerr << "Exception: " << e.what() << endl;
+        std::cerr << "Exception: " << e.what() << std::endl;
     }
 }

@@ -81,7 +81,7 @@ namespace xxh
 
 			bool operator>(const uint128_t & other) const noexcept
 			{
-				return (high64 > other.high64 || low64 > other.low64);
+				return (high64 > other.high64 || high64 > other.high64 && low64 > other.low64);
 			}
 
 			bool operator>=(const uint128_t & other) const noexcept
