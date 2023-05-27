@@ -20,11 +20,11 @@ Total: xxx
 Done in x.xxxs.
  */
 
-#include <iostream>
+#include <print>
 #include <fstream>
-#include <format>
 #include <filesystem>
 
+#include <memory>
 #include <ranges>
 #include <map>
 #include <vector>
@@ -34,17 +34,6 @@ Done in x.xxxs.
 namespace fs = std::filesystem;
 namespace ranges = std::ranges;
 namespace views = std::views;
-
-using std::format;
-
-#ifdef __WINDOWS__
-# define myout std::wcout
-# define _T(x) L ## x
-#else
-# define myout std::cout
-# define _T(x) x
-#endif
-
 
 /**
  * @brief Group the same files in @p filelist into @p res.
@@ -57,19 +46,19 @@ using std::format;
  * group them by hash value.
  * Every ultimate multiple group is a result.
  */
-template<ranges::input_range Iterable, class Container>
+template<class Iterable, class Container>
 void hash_check(Iterable&& filelist, Container &res)
 {
-    constexpr std::size_t buffersize{1<<15}; // 32 KiB
+    constexpr std::size_t buffersize {1<<15}; // 32 KiB
+    thread_local auto buffer = std::make_unique_for_overwrite<char[]>(buffersize);
     std::map<xxh::hash128_t, typename Container::value_type> map1, map2;
-    char buffer[buffersize];
 
     if (fs::file_size(*filelist.cbegin()) <= buffersize)
     {
         for (auto&& file: filelist) {
             std::ifstream fin(file, std::ios_base::binary);
-            fin.read(buffer, buffersize);
-            auto hash = xxh::xxhash3<128>(buffer, fin.gcount());
+            fin.read(buffer.get(), buffersize);
+            auto hash = xxh::xxhash3<128>(buffer.get(), fin.gcount());
             map1[hash].emplace_back(std::forward_like<Iterable>(file));
         }
         for (auto& files: map1 | views::values)
@@ -78,33 +67,37 @@ void hash_check(Iterable&& filelist, Container &res)
         return;
     }
 
-    for (auto&& file: filelist) {
-        constexpr auto buffersize{1<<10}; // 1 KiB
-        constexpr auto halfsize{buffersize/2};
+    for (auto&& file: filelist)
+    {
+        constexpr auto buffersize {1<<10}; // 1 KiB
+        constexpr auto halfsize {buffersize/2};
+
         std::ifstream fin(file, std::ios_base::binary);
-        fin.read(buffer, buffersize-halfsize);
+        fin.read(buffer.get(), buffersize - halfsize);
         fin.seekg(-halfsize, std::ios_base::end);
-        fin.read(buffer+halfsize, halfsize);
-        auto hash = xxh::xxhash3<128>(buffer, buffersize);
+        fin.read(buffer.get() + halfsize, halfsize);
+
+        auto hash = xxh::xxhash3<128>(buffer.get(), buffersize);
         map1[hash].emplace_back(std::forward_like<Iterable>(file));
     }
 
     xxh::hash3_state128_t state;
 
     for (auto& files1: map1 | views::values)
-    if (files1.size() > 1) {
+      if (files1.size() > 1)
+      {
         for (auto& file: files1) {
             std::ifstream fin(file, std::ios_base::binary);
             state.reset();
-            while (fin.read(buffer, buffersize).gcount())
-                state.update(buffer, fin.gcount());
+            while (fin.read(buffer.get(), buffersize).gcount())
+                state.update(buffer.get(), fin.gcount());
             map2[state.digest()].emplace_back(std::move(file));
         }
         for (auto& files2: map2 | views::values)
             if (files2.size() > 1)
                 res.emplace_back(std::move_if_noexcept(files2));
         map2.clear();
-    }
+      } 
 }
 
 /**
@@ -117,22 +110,23 @@ auto search(const fs::path& dir, Container& size_map)
 {
     std::size_t tot=0, empty=0;
 
-    myout << _T("Empty file list:") << std::endl;
+    std::println("Empty file list:");
+
     for (const auto& entry: fs::recursive_directory_iterator{dir})
-    if (entry.is_regular_file())
-    {
+      if (entry.is_regular_file())
+      {
         tot++;
-        auto& path_str = entry.path().native();
+        auto path_str = entry.path().generic_string();
         if (entry.file_size()) {
             size_map[entry.file_size()].emplace_back(path_str);
         }
         else {
             empty++;
-            myout << path_str << std::endl;
+            std::println("{}", path_str);
         }
-    }
+      }
 
-    myout << format(_T("\nEmpty: {}\nTotal: {}\n"), empty, tot) << std::endl;
+    std::println("\nEmpty: {}\nTotal: {}\n", empty, tot);
 
     return std::make_pair(tot-empty, tot);
 }
@@ -148,12 +142,10 @@ auto search(const fs::path& dir, Container& size_map)
  */
 void duplicate_file_search(const fs::path dirpath)
 {
-    using path_string = fs::path::string_type;
-
-    std::map<std::uint64_t, std::vector<path_string>> size_map;
+    std::map<std::uint_least64_t, std::vector<std::string>> size_map;
     search(dirpath, size_map);
     std::size_t num=0;
-    std::uint_fast64_t rdsize=0; // redundant data size
+    std::uintmax_t rdsize=0; // redundant data size
 
     for (auto&& pair: size_map)
     {
@@ -162,28 +154,26 @@ void duplicate_file_search(const fs::path dirpath)
         if (paths.size() <= 1)
             continue;
 
-        std::vector<std::vector<path_string>> res;
+        std::vector<std::vector<std::string>> res;
         hash_check(std::move(paths), res);
         for (auto&& paths: res) {
             num++;
             rdsize += filesize * (paths.size()-1);
             ranges::sort(paths);
-            myout << format(_T(" #{} ({}) {:L} B\n"), num, paths.size(), filesize);
+            std::println(" #{} ({}) {} B", num, paths.size(), filesize);
             for (const auto& p: paths)
-                (myout << p).put('\n');
-            myout << std::endl;
+                // This needs to be enforced on Windows.
+                std::vprint_nonunicode("{}\n", std::make_format_args(p));
+            std::println("");
         }
     }
 
-    myout << format(_T("Redundant data size: {:L} B\n\nDone in {:.3f}s.\n"),
+    std::println("Redundant data size: {} B\n\nDone in {:.3f}s.",
                     rdsize, (double)clock()/CLOCKS_PER_SEC);
 }
 
 int main(int argc, char *argv[])
 {
-    std::locale::global(std::locale{""});
-    std::ios_base::sync_with_stdio(false);
-
     fs::path dir;
 
     if (argc <= 1) {
@@ -193,16 +183,16 @@ int main(int argc, char *argv[])
         dir = argv[1];
         if (!fs::exists(dir) || !fs::is_directory(dir))
         {
-            myout << _T("No such directory.\n");
+            std::println("No such directory.");
             return 0;
         }
     }
 
     try { duplicate_file_search(dir); }
     catch (const fs::filesystem_error& fs_err) {
-        std::cerr << "Filesystem Exception: " << fs_err.what() << std::endl;
+        std::println(stderr, "Filesystem Exception: {}", fs_err.what());
     }
     catch (const std::exception& e) {
-        std::cerr << "Exception: " << e.what() << std::endl;
+        std::println(stderr, "Exception: ", e.what());
     }
 }
