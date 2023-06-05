@@ -21,9 +21,12 @@ Done in x.xxxs.
  */
 
 #include <print>
+#include <iomanip>
 #include <fstream>
+#include <sstream>
 #include <filesystem>
 
+#include <bit>
 #include <memory>
 #include <ranges>
 #include <map>
@@ -34,6 +37,28 @@ Done in x.xxxs.
 namespace fs = std::filesystem;
 namespace ranges = std::ranges;
 namespace views = std::views;
+
+
+std::string prettify_bytes(std::size_t size)
+{
+    using namespace std::literals;
+    constexpr std::string_view unit[]{"B"sv, "KiB"sv, "MiB"sv, "GiB"sv, "TiB"sv};
+    int base = std::countr_zero(std::bit_floor(size)) / 10;
+    std::uint16_t len=0, s[7];
+    std::ostringstream o;
+    o.precision(4);
+    o << (double)size/(1<<(base*10)) << ' ' << unit[base] << " (";
+    while (size) {
+        s[len++] = size%1000;
+        size /= 1000;
+    }
+    o << s[--len];
+    o.fill('0');
+    while (len)
+        o << ' ' << std::setw(3) << s[--len];
+    o << " B)";
+    return o.str();
+};
 
 /**
  * @brief Group the same files in @p filelist into @p res.
@@ -97,7 +122,7 @@ void hash_check(Iterable&& filelist, Container &res)
             if (files2.size() > 1)
                 res.emplace_back(std::move_if_noexcept(files2));
         map2.clear();
-      } 
+      }
 }
 
 /**
@@ -109,6 +134,7 @@ template <class Container>
 auto search(const fs::path& dir, Container& size_map)
 {
     std::size_t tot=0, empty=0;
+    std::size_t tot_size=0;
 
     std::println("Empty file list:");
 
@@ -118,6 +144,7 @@ auto search(const fs::path& dir, Container& size_map)
         tot++;
         auto path_str = entry.path().generic_string();
         if (entry.file_size()) {
+            tot_size += entry.file_size();
             size_map[entry.file_size()].emplace_back(path_str);
         }
         else {
@@ -126,9 +153,9 @@ auto search(const fs::path& dir, Container& size_map)
         }
       }
 
-    std::println("\nEmpty: {}\nTotal: {}\n", empty, tot);
+    std::println("\nEmpty: {}\nTotal: {}\nSize:  {}\n", empty, tot, prettify_bytes(tot_size));
 
-    return std::make_pair(tot-empty, tot);
+    return std::make_tuple(tot_size, tot, tot-empty);
 }
 
 /**
@@ -160,7 +187,7 @@ void duplicate_file_search(const fs::path dirpath)
             num++;
             rdsize += filesize * (paths.size()-1);
             ranges::sort(paths);
-            std::println(" #{} ({}) {} B", num, paths.size(), filesize);
+            std::println(" #{} [{}]  {}", num, paths.size(), prettify_bytes(filesize));
             for (const auto& p: paths)
                 // This needs to be enforced on Windows.
                 std::vprint_nonunicode("{}\n", std::make_format_args(p));
@@ -168,8 +195,8 @@ void duplicate_file_search(const fs::path dirpath)
         }
     }
 
-    std::println("Redundant data size: {} B\n\nDone in {:.3f}s.",
-                    rdsize, (double)clock()/CLOCKS_PER_SEC);
+    std::println("Redundant data size: {}\n\nDone in {:.3f}s.",
+                    prettify_bytes(rdsize) , (double)clock()/CLOCKS_PER_SEC);
 }
 
 int main(int argc, char *argv[])
