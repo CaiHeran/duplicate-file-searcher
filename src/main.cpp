@@ -21,7 +21,6 @@ Done in x.xxxs.
  */
 
 #include <print>
-#include <iomanip>
 #include <fstream>
 #include <sstream>
 #include <filesystem>
@@ -41,11 +40,16 @@ namespace views = std::views;
 
 std::string prettify_bytes(std::size_t size)
 {
+    if (size < 1000)
+        return std::format("{} B", size);
+
     using namespace std::literals;
     constexpr std::string_view unit[]{"B"sv, "KiB"sv, "MiB"sv, "GiB"sv, "TiB"sv};
+
     int base = std::countr_zero(std::bit_floor(size)) / 10;
     std::uint16_t len=0, s[7];
     std::ostringstream o;
+
     o.precision(4);
     o << (double)size/(1<<(base*10)) << ' ' << unit[base] << " (";
     while (size) {
@@ -53,9 +57,8 @@ std::string prettify_bytes(std::size_t size)
         size /= 1000;
     }
     o << s[--len];
-    o.fill('0');
     while (len)
-        o << ' ' << std::setw(3) << s[--len];
+        o << std::format(" {:03d}", s[--len]);
     o << " B)";
     return o.str();
 };
@@ -94,7 +97,7 @@ void hash_check(Iterable&& filelist, Container &res)
 
     for (auto&& file: filelist)
     {
-        constexpr auto buffersize {1<<10}; // 1 KiB
+        constexpr auto buffersize {1<<8}; // 256 B
         constexpr auto halfsize {buffersize/2};
 
         std::ifstream fin(file, std::ios_base::binary);
@@ -114,8 +117,10 @@ void hash_check(Iterable&& filelist, Container &res)
         for (auto& file: files1) {
             std::ifstream fin(file, std::ios_base::binary);
             state.reset();
-            while (fin.read(buffer.get(), buffersize).gcount())
+            do {
+                fin.read(buffer.get(), buffersize);
                 state.update(buffer.get(), fin.gcount());
+            } while(fin);
             map2[state.digest()].emplace_back(std::move(file));
         }
         for (auto& files2: map2 | views::values)
@@ -169,7 +174,7 @@ auto search(const fs::path& dir, Container& size_map)
  */
 void duplicate_file_search(const fs::path dirpath)
 {
-    std::map<std::uint_least64_t, std::vector<std::string>> size_map;
+    std::map<std::uint64_t, std::vector<std::string>> size_map;
     search(dirpath, size_map);
     std::size_t num=0;
     std::uintmax_t rdsize=0; // redundant data size
