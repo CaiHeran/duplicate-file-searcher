@@ -18,7 +18,7 @@ Size:  xxx.x MiB (xxx xxx xxx B)
 ...
 ......
 
-Redundant data size: x.xxx MiB (x xxx xxx B)
+Possible redundant data size: x.xxx MiB (x xxx xxx B)
 
 Done in x.xxxs.
  */
@@ -70,19 +70,21 @@ std::string prettify_bytes(std::size_t size)
  * @brief Group the same files in @p filelist into @p res.
  *
  * Algorithm:
- * In case of small files, directly hash the whole files.
- * Or else, hash the first bytes and last bytes firstly,
- * and group files by hash value.
- * Then for each multiple group, hash the entire files
- * and group them by hash value.
- * Every ultimate multiple group is a result.
+ * In case of small files, hash the whole files.
+ * Or else, hash the first bytes and last bytes,
+ * *ignoring the rest*, and group files by hash value.
+ * Every multiple group is a result.
+ *
+ * @warning:
+ * *This algorithm is only for quick initial screening,*
+ * *so be sure to remember to screen again.*
  */
 template<class Iterable, class Container>
 void hash_check(Iterable&& filelist, Container &res)
 {
-    constexpr std::size_t bufsize {1<<15}; // 32 KiB
+    constexpr std::size_t bufsize {1<<18}; // 256 KiB
     thread_local auto buf = std::make_unique_for_overwrite<char[]>(bufsize);
-    std::map<xxh::hash128_t, typename Container::value_type> map1, map2;
+    std::map<xxh::hash128_t, typename Container::value_type> hashmap;
 
     if (auto filesize = fs::file_size(*filelist.cbegin()); filesize <= bufsize)
     {
@@ -90,47 +92,27 @@ void hash_check(Iterable&& filelist, Container &res)
             std::ifstream fin(file, std::ios_base::binary);
             fin.read(buf.get(), filesize);
             auto hash = xxh::xxhash3<128>(buf.get(), filesize);
-            map1[hash].emplace_back(std::forward_like<Iterable>(file));
+            hashmap[hash].emplace_back(std::forward_like<Iterable>(file));
         }
-        for (auto& files: map1 | views::values)
-            if (files.size() > 1)
-                res.emplace_back(std::move_if_noexcept(files));
-        return;
     }
+    else {
+        for (auto&& file: filelist)
+        {
+            constexpr auto halfsize {bufsize/2};
 
-    for (auto&& file: filelist)
-    {
-        constexpr auto sbufsize {1<<8}; // 256 B
-        constexpr auto halfsize {sbufsize/2};
-
-        std::ifstream fin(file, std::ios_base::binary);
-        fin.read(buf.get(), sbufsize - halfsize);
-        fin.seekg(-halfsize, std::ios_base::end);
-        fin.read(buf.get() + halfsize, halfsize);
-
-        auto hash = xxh::xxhash3<128>(buf.get(), sbufsize);
-        map1[hash].emplace_back(std::forward_like<Iterable>(file));
-    }
-
-    xxh::hash3_state128_t state;
-
-    for (auto& files1: map1 | views::values)
-      if (files1.size() > 1)
-      {
-        for (auto& file: files1) {
             std::ifstream fin(file, std::ios_base::binary);
-            state.reset();
-            do {
-                fin.read(buf.get(), bufsize);
-                state.update(buf.get(), fin.gcount());
-            } while(fin);
-            map2[state.digest()].emplace_back(std::move(file));
+            fin.read(buf.get(), bufsize - halfsize);
+            fin.seekg(-halfsize, std::ios_base::end);
+            fin.read(buf.get() + halfsize, halfsize);
+
+            auto hash = xxh::xxhash3<128>(buf.get(), bufsize);
+            hashmap[hash].emplace_back(std::forward_like<Iterable>(file));
         }
-        for (auto& files2: map2 | views::values)
-            if (files2.size() > 1)
-                res.emplace_back(std::move_if_noexcept(files2));
-        map2.clear();
-      }
+    }
+
+    for (auto& files: hashmap | views::values)
+        if (files.size() > 1)
+            res.emplace_back(std::move_if_noexcept(files));
 }
 
 /**
@@ -203,7 +185,7 @@ void duplicate_file_search(const fs::path dirpath)
         }
     }
 
-    std::println("Redundant data size: {}\n\nDone in {:.3f}s.",
+    std::println("Possible redundant data size: {}\n\nDone in {:.3f}s.",
                     prettify_bytes(rdsize) , (double)clock()/CLOCKS_PER_SEC);
 }
 
